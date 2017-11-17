@@ -1,5 +1,5 @@
 # Watchl
-A small command-line utility, made with the intent to combine elements of `watch` and `less`, periodically executing a shell command and providing a scrollable output, with the scrolling position kept between updates of the command's output.
+A small command-line utility, made with the intent to combine elements of `watch` and `less`, periodically executing a shell command and providing a scrollable output, with the scrolling position kept between updates of the command's output. Watchl uses the standard Python curses module to maintain it's display, and has no external dependencies.
 
 ## Usage
 
