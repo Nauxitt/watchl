@@ -1,161 +1,183 @@
 #!/usr/bin/python3
 
 import curses
-import sys
-import builtins
 import os
 from argparse import ArgumentParser
 from subprocess import Popen, PIPE, STDOUT
 import time
-from io import StringIO
 from threading import Thread, Lock
 from locked import Locked
-from queue import Queue
 
 # TODO : establish consistent capitalization/underscoring naming pattern
-# TODO : turn into usable Python module, where the user may supply their own display buffer update hook
 # TODO : add search feature to viewer
 # TODO : view scrolling position at bottom of viewer
 # TODO : execution rate/interval argument
 # TODO : is color piping possible?
-# TODO: if scrolled to the bottom and lines are added, stay at the bottom
-# TODO : turn functions into Thread methods
+# TODO : if scrolled to the bottom and lines are added, stay at the bottom
+# TODO : space, page_up, and page_down in the viewer
 
 
-def deinit_curses(screen):
+def _deinit_curses(screen):
 	curses.nocbreak()
 	screen.keypad(0)
 	curses.echo()
 	curses.endwin()
 
-def refreshBuffer(cmd, lineBuffer, lineBufferUpdated, EXECUTE_RATE=0.5):
-	""" To be ran in its own thread. Periodically issues a system call and updates a buffer with the output of the command's stdout and stderr.
-		
-		Arguments:
-			cmd - The command to periodically run
-
-			lineBuffer - a Locked object, whose value are a list of strings, each a line to be displayed by `def viewer()`
-
-			lineBufferUpdated - a Locked object, containing a boolean, denoting to the viewer that `lineBuffer` has been updated, signalling to update its internal buffer.
-
-			EXECUTE_RATE - how many times the command should be executed, per second
-	"""
-
-	cmdBuffer = None
-	last_executed = 0
-
-	# Buffer update loop
-	while True:
-		# Restrict update rate
-		t = time.time()
-		if t - last_executed < 1/EXECUTE_RATE:
-			continue
-
-
-		# Execute command
-		cmdBuffer = Popen(
-			cmd, shell=1,
-			stderr=STDOUT, stdout=PIPE,
-			env=os.environ.copy()
-		)
-
-		cmdBuffer.wait()
-		last_executed = time.time()
-
-		# Write results to lineBuffer
-		with lineBuffer:
-			lineBuffer.value = cmdBuffer.stdout\
-					.read().decode().split("\n")
-
-		# Flag that lineBuffer has been updated
-		with lineBufferUpdated:
-			lineBufferUpdated.value = True
-
-def viewer(lineBuffer, lineBufferUpdated, DISPLAY_RATE=5):
-	""" To be ran in it's own thread.  Handles user display and keyboard interaction via curses.
-		Arguments:
-			lineBuffer - Locked object, containing a list of strings, to be copied to a buffer in viewer()'s namespace, with each string each to be displayed on it's own line. 
-
-			lineBufferUpdated - Locked object containing a boolean denoting that lineBuffer has been updated, and therefore should be copied to viewer()'s internal display buffer.
-
-			DISPLAY_RATE - how many times, per second, the display should be updated
-	"""
-
-	# Init curses screen
-	screen = curses.initscr()
-	curses.cbreak()
-	curses.noecho()
-	curses.halfdelay(5)
-	screen.keypad(1)
-
-	# Encapsulate subroutine in try block to deinit curses upon exception
-	try:
-		line_num = 0
-		last_refreshed = 0
-		lineBufferCurrent = None
-		
-		# Wait until lineBuffer is populated for the first time, then
-		# update display
-		while True:
-			with lineBuffer:
-				if lineBuffer.value is not None:
-					lineBufferCurrent = lineBuffer.value.copy()
-					break
-			time.sleep(0.1)
-		
-		# Display loop
-		while True:
-			# Limit display rate
-			t = time.time()
-			if t - last_refreshed >= 1/DISPLAY_RATE:
-				last_refreshed = t
-				continue
-			last_refreshed = t
-
-			screen.clear()
-			screen.border(0)
-			height, width = screen.getmaxyx()
+class CommandBufferRefresh(Thread):
+	def __init__(self, cmd, lineBuffer, lineBufferUpdated, execute_rate=0.5):
+		""" Periodically issues a system command and updates a buffer (stored in a Locked object containing a list of lines) with the output of the command's stdout and stderr.
 			
-			# If the lineBuffer has been updated, copy it to the
-			# internal buffer
-			with lineBufferUpdated as u:
-				if u.value:
-					with lineBuffer as lb:
-						lineBufferCurrent = lb.value.copy()
-					u.value = False
+			Arguments:
+				cmd - The command to periodically run
 
-			# Update screen with value from internal display buffer,
-			# but only the lines between the top of the scrolled display
-			# and the rest forward which can fit on the screen
-			# screen.addstr(0, 1, str(len(lineBufferCurrent)))
-			BORDER = 2
-			for d, line in enumerate(lineBufferCurrent[line_num:line_num+height-BORDER]):
-				i = d + line_num
-				if i-line_num >= height - BORDER:
-					break
-				screen.addstr(i-line_num+1, 1, line[:width-BORDER])
-			char = screen.getch()
+				lineBuffer - a Locked object, whose value are a list of strings, each a line to be displayed by `def viewer()`
 
-			# input switch
-			if char == ord('q'):
-				break  # quit
-			elif char in (curses.KEY_UP, ord('k')):
-				# scroll up
-				if line_num > 0:
-					line_num -= 1
-			elif char in (curses.KEY_DOWN, ord('j')):
-				# scroll down
-				if line_num + height + 1 <= len(lineBufferCurrent):
-					line_num += 1
-			elif char == ord('g'):
-				# scroll to top
-				line_num = 0
-			elif char == ord('G'):
-				# scroll to bottom
-				line_num = len(lineBufferCurrent) - height
-			screen.refresh()
-	finally:
-		deinit_curses(screen)
+				lineBufferUpdated - a Locked object, containing a boolean, denoting to the viewer that `lineBuffer` has been updated, signalling to update its internal buffer.
+
+				execute_rate - how many times the command should be executed, per second
+		"""
+		# TODO : daemon mode potentially dangerous. Consider implementing exit flag
+		Thread.__init__(self, daemon=True)
+		self.cmd = cmd
+		self.lineBuffer = lineBuffer
+		self.lineBufferUpdated = lineBufferUpdated
+		self.execute_rate = execute_rate
+
+	def run(self):
+		cmdBuffer = None
+		last_executed = 0
+
+		# Buffer update loop
+		while True:
+			# Restrict update rate
+			t = time.time()
+			if t - last_executed < 1/self.execute_rate:
+				continue
+
+
+			# Execute command
+			cmdBuffer = Popen(
+				self.cmd, shell=1,
+				stderr=STDOUT, stdout=PIPE,
+				env=os.environ.copy()
+			)
+
+			cmdBuffer.wait()
+			last_executed = time.time()
+
+			# Write results to self.lineBuffer
+			with self.lineBuffer:
+				self.lineBuffer.value = cmdBuffer.stdout\
+						.read().decode().split("\n")
+
+			self.lineBufferUpdated.set(True)
+
+
+class Viewer(Thread):
+	def __init__(self, refresh_buffer=None, refresh_update=None, display_rate=5):
+		""" Handles user display and keyboard interaction via curses.
+			Arguments:
+				refresh_buffer - Locked object, containing a list of strings, to be copied to a buffer in viewer()'s namespace, with each string each to be displayed on it's own line. 
+
+				refresh_update - Locked object containing a boolean denoting that lineBuffer has been updated, and therefore should be copied to viewer()'s internal display buffer.
+
+				self.display_rate - how many times, per second, the display should be updated
+		"""
+		Thread.__init__(self)
+		self.refresh_buffer = Locked(list()) if refresh_buffer is None else refresh_buffer
+		self.refresh_update = Locked(False)  if refresh_update is None else refresh_update
+		self.display_buffer = list()
+		self.display_rate = display_rate
+
+	def set(self, val):
+		""" Sets the content in viewer to val, where val is a list of strings """
+		self.refresh_buffer.set(val)
+		self.refresh_update.set(True)
+
+	def getBuffer(self):
+		""" Returns a tuple of two Locked objects, the first containing a list of strings which points to the viewer's content, and the second containing a boolean which, when set to true, tells the viewer that the content has been refreshed. """
+		return self.refresh_buffer, self.refresh_update
+
+	def run(self):
+		# Init curses screen
+		screen = curses.initscr()
+		curses.cbreak()
+		curses.noecho()
+		curses.halfdelay(5)
+		screen.keypad(1)
+
+		# Encapsulate subroutine in try block to deinit curses upon exception
+		try:
+			line_num = 0
+			last_refreshed = 0
+			self.display_buffer = None
+			
+			# Wait until self.refresh_buffer is populated for the first time, then
+			# update display
+			while True:
+				with self.refresh_buffer:
+					if self.refresh_buffer.value is not None:
+						self.display_buffer = self.refresh_buffer.value.copy()
+						break
+				time.sleep(0.1)
+			
+			# Display loop
+			while True:
+
+				# Limit display rate
+				t = time.time()
+				if t - last_refreshed >= 1/self.display_rate:
+					last_refreshed = t
+					continue
+				last_refreshed = t
+
+				screen.clear()
+				screen.border(0)
+				height, width = screen.getmaxyx()
+				
+				# If the self.refresh_buffer has been updated, copy it to the
+				# internal buffer
+				with self.refresh_update as u:
+					if u.value:
+						with self.refresh_buffer as lb:
+							self.display_buffer = lb.value.copy()
+						u.value = False
+
+				# Update screen with value from internal display buffer,
+				# but only the lines between the top of the scrolled display
+				# and the rest forward which can fit on the screen
+				# screen.addstr(0, 1, str(len(self.display_buffer)))
+				BORDER = 2
+				for d, line in enumerate(self.display_buffer[line_num:line_num+height-BORDER]):
+					i = d + line_num
+					if i-line_num >= height - BORDER:
+						break
+					screen.addstr(i-line_num+1, 1, line[:width-BORDER])
+				char = screen.getch()
+
+				# input switch
+				if char == ord('q'):
+					break  # quit
+				elif char in (curses.KEY_UP, ord('k')):
+					# scroll up
+					if line_num > 0:
+						line_num -= 1
+				elif char in (curses.KEY_DOWN, ord('j')):
+					# scroll down
+					if line_num + height + 1 <= len(self.display_buffer):
+						line_num += 1
+				elif char == ord('g'):
+					# scroll to top
+					line_num = 0
+				elif char == ord('G'):
+					# scroll to bottom
+					line_num = len(self.display_buffer) - height
+				screen.refresh()
+		except Exception as e:
+			_deinit_curses(screen)
+			raise e
+		finally:
+			_deinit_curses(screen)
 
 def main():
 	""" Parses CLI arguments and initializes some threads to maintain a buffer of output from a supplied system command and update them to a scrollable CLI interface.
@@ -183,23 +205,13 @@ def main():
 	cmd = " ".join(parsed.evaluate)
 
 	# Threads
-	lineBuffer = Locked()
-	lineBufferUpdated = Locked(False)
+	viewer = Viewer()
+	buffer, bufferUpdated = viewer.getBuffer()
 
-	t_viewer = Thread(
-		target=viewer,
-		args=[lineBuffer, lineBufferUpdated]
-	)
+	refresh = CommandBufferRefresh(cmd, buffer, bufferUpdated)
 
-	t_refresh_buffer = Thread(
-		target=refreshBuffer,
-		args=(cmd, lineBuffer, lineBufferUpdated)
-	)
-	# TODO : daemon mode potentially dangerous. Consider implementing exit flag
-	t_refresh_buffer.daemon = True
-
-	t_viewer.start()
-	t_refresh_buffer.start()
+	viewer.start()
+	refresh.start()
 
 if __name__=="__main__":
 	main()

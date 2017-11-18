@@ -22,10 +22,12 @@ class Locked(object):
 		self._lock.release()
 	
 	def set(self, val):
-		self.value = val
+		with self:
+			self.value = val
 	
 	def get(self):
-		return self.value
+		with self:
+			return self.value
 
 	def __add__(self, val):
 		return self.value + val
