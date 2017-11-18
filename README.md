@@ -11,11 +11,11 @@ Watchl's Viewer class can also be imported into a Python script that utilizes Wa
 This will provide a scrollable, live-updated list of the files in your home directory.
 
 ```
-./watchl.py ./pyview.sh ./watchl.py
+./watchl.py ./pyview.sh pythonscript.py
 ```
 `pyview.sh` is a small script to get a summary of any Python source files in the arguments.  Using it with watchl will make that list scrollable and responsive to changes.
 
-```
+```python
 from watchl import Viewer
 from time import sleep
 
