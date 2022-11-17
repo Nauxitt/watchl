@@ -5,7 +5,7 @@ import os
 from argparse import ArgumentParser
 from subprocess import Popen, PIPE, STDOUT
 import time
-from threading import Thread, Lock
+from threading import Thread
 from locked import Locked
 
 # TODO : establish consistent capitalization/underscoring naming pattern
@@ -205,6 +205,7 @@ def main():
 	cmd = " ".join(parsed.evaluate)
 
 	# Threads
+	threads = []
 	viewer = Viewer()
 	buffer, bufferUpdated = viewer.getBuffer()
 
@@ -212,6 +213,12 @@ def main():
 
 	viewer.start()
 	refresh.start()
+
+	threads.append(viewer)
+	threads.append(refresh)
+
+	for t in threads:
+		t.join(timeout=1)
 
 if __name__=="__main__":
 	main()
